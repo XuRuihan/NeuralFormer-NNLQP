@@ -26,34 +26,17 @@ def gen_Khop_adj(edge_index, n_tokens, k=1):
         return matrix
 
 
-def init_tensor(tensor, init_type, nonlinearity):
-    if tensor is None or init_type is None:
-        return
-    if init_type == "thomas":
-        size = tensor.size(-1)
-        stdv = 1.0 / math.sqrt(size)
-        nn.init.uniform_(tensor, -stdv, stdv)
-    elif init_type == "kaiming_normal_in":
-        nn.init.kaiming_normal_(tensor, mode="fan_in", nonlinearity=nonlinearity)
-    elif init_type == "kaiming_normal_out":
-        nn.init.kaiming_normal_(tensor, mode="fan_out", nonlinearity=nonlinearity)
-    elif init_type == "kaiming_uniform_in":
-        nn.init.kaiming_uniform_(tensor, mode="fan_in", nonlinearity=nonlinearity)
-    elif init_type == "kaiming_uniform_out":
-        nn.init.kaiming_uniform_(tensor, mode="fan_out", nonlinearity=nonlinearity)
-    elif init_type == "orthogonal":
-        nn.init.orthogonal_(tensor, gain=nn.init.calculate_gain(nonlinearity))
-    else:
-        raise ValueError(f"Unknown initialization type: {init_type}")
-
-
 class Scale(nn.Module):
-    def __init__(self, dim, init_value=1.0):
+    def __init__(self, dim: int, init_value: float = 1e-4):
         super().__init__()
+        self.init_value = init_value
         self.scale = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         return x * self.scale
+
+    def extra_repr(self) -> str:
+        return f"init_value={self.init_value}"
 
 
 class GNN_LinearAttn(nn.Module):
@@ -69,14 +52,6 @@ class GNN_LinearAttn(nn.Module):
 
         if degree:
             self.lin_d = nn.Linear(1, dim)
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.lin_l.reset_parameters()
-        self.lin_r.reset_parameters()
-        if self.degree:
-            self.lin_d.reset_parameters()
 
     def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
         if self.degree:
@@ -154,8 +129,8 @@ class MultiHeadAttention(nn.Module):
         self.head_size = dim // self.n_head  # default: 32
 
         self.qkv = nn.Linear(dim, 3 * dim)
-        self.proj = nn.ReLU()  # nn.Linear(dim, dim)
-        self.attn_dropout = nn.Identity()  # nn.Dropout(dropout)
+        self.proj = nn.Linear(dim, dim)
+        self.attn_dropout = nn.Dropout(dropout)
         self.resid_dropout = nn.Dropout(dropout)
 
         self.rel_pos_bias = rel_pos_bias
@@ -170,30 +145,30 @@ class MultiHeadAttention(nn.Module):
 
         B, L, C = x.shape
 
-        qk, res, value = self.qkv(x).chunk(3, -1)
-        qk = qk.view(B, L, self.n_head, self.head_size).transpose(1, 2)
-        res = res.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        query, key, value = self.qkv(x).chunk(3, -1)
+        query = query.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        key = key.view(B, L, self.n_head, self.head_size).transpose(1, 2)
         value = value.view(B, L, self.n_head, self.head_size).transpose(1, 2)
-        qk = torch.sigmoid(qk)
         # (b, n_head, l_q, d_per_head) * (b, n_head, d_per_head, l_k)
-        attn = torch.matmul(qk, qk.mT) / math.sqrt(self.head_size)
+        attn = torch.matmul(query, key.mT) / math.sqrt(self.head_size)
 
         if self.rel_pos_bias:
-            # attn_mask = adj + torch.eye(
-            #     adj.shape[-1], dtype=adj.dtype, device=adj.device
-            # )
+            attn_mask = adj + torch.eye(
+                adj.shape[-1], dtype=adj.dtype, device=adj.device
+            )
+            attn = attn.masked_fill(attn_mask == 0, -torch.inf)
+            attn = F.softmax(attn, dim=-1)
+        else:
             attn_mask = adj
-            # attn = attn * (1 + attn_mask)
-            # attn = attn * attn_mask
-            attn = attn.masked_fill(attn_mask == 0, 0)
+            attn = attn.masked_fill(attn_mask == 0, -torch.inf)
+            attn = F.softmax(attn, dim=-1) + torch.eye(
+                attn.shape[-1], dtype=attn.dtype, device=attn.device
+            )
 
-        # attn = F.softmax(attn, dim=-1)
-        attn = attn / (attn.sum(-1, keepdim=True) + 1e-6)
-        # attn = attn + torch.eye(attn.shape[-1], dtype=attn.dtype, device=attn.device)
         # attn = F.relu(attn)
         # attn = attn / (attn.sum(-1, True) + 1e-6)
         attn = self.attn_dropout(attn)  # (b, n_head, l_q, l_k)
-        x = torch.matmul(attn, value) + res
+        x = torch.matmul(attn, value)
 
         x = x.transpose(1, 2).contiguous().view(B, L, self.dim)
         return self.resid_dropout(self.proj(x))
@@ -213,7 +188,7 @@ class SelfAttentionBlock(nn.Module):
         rel_pos_bias: bool = False,
     ):
         super().__init__()
-        self.norm = nn.Identity()  # nn.LayerNorm(dim)
+        self.norm = nn.LayerNorm(dim)
         # The larger the dataset, the better rel_pos_bias works
         # probably due to the overfitting of rel_pos_bias
         self.attn = MultiHeadAttention(
@@ -224,12 +199,13 @@ class SelfAttentionBlock(nn.Module):
             rel_pos_bias=rel_pos_bias,
         )
         self.drop_path = DropPath(droppath) if droppath > 0.0 else nn.Identity()
-        self.layer_scale = Scale(dim, 1e-4)
+        self.layer_scale = Scale(dim)
+        self.res_scale = nn.Identity()  # Scale(dim, 1.0)
 
     def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
         x_ = self.norm(x)
         x_ = self.attn(x_, adj)
-        return self.layer_scale(self.drop_path(x_)) + x
+        return self.layer_scale(self.drop_path(x_)) + self.res_scale(x)
 
 
 class GCNMlp(nn.Module):
@@ -284,32 +260,37 @@ class FeedForwardBlock(nn.Module):
         super().__init__()
 
         self.norm = nn.LayerNorm(dim)
-        self.feed_forward = GCNMlp(dim, mlp_ratio, act_layer=act_layer, drop=dropout)
+        self.mlp = GCNMlp(dim, mlp_ratio, act_layer=act_layer, drop=dropout)
         self.drop_path = DropPath(droppath) if droppath > 0.0 else nn.Identity()
-        self.layer_scale = Scale(dim, 1e-4)
+        self.layer_scale = Scale(dim)
+        self.res_scale = nn.Identity()  # Scale(dim, 1.0)
 
     def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
         x_ = self.norm(x)
-        x_ = self.feed_forward(x_, adj)
-        return self.layer_scale(self.drop_path(x_)) + x
+        x_ = self.mlp(x_, adj)
+        return self.layer_scale(self.drop_path(x_)) + self.res_scale(x)
 
 
 class PreReduction(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.0):
         super().__init__()
+        assert in_dim == out_dim
         self.in_dim = in_dim
         self.norm = nn.LayerNorm(in_dim)
-        self.net = nn.Sequential(
+        self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, out_dim),
+            nn.Dropout(p=dropout),
         )
+        self.scale = 1e-2
+        # self.layer_scale = Scale(out_dim, 1e-2)
 
     def forward(self, x):
-        x = self.norm(x) * 0.01
-        x = self.net(x) + x
-        return x
+        x = self.norm(x)  # normalize each position
+        out = self.mlp(x)
+        return self.scale * (out + x)  # scale for stability of `sum` reduction
 
 
 # reduce_func: "sum", "mul", "mean", "min", "max"
@@ -342,8 +323,6 @@ class Net(nn.Module):
         self.embedding = nn.Linear(num_node_features, gnn_hidden)
 
         self.gnn_layers = nn.ModuleList()
-        # self.gnn_drops = nn.ModuleList()
-        # self.gnn_relus = nn.ModuleList()
         self.FFN_layers = nn.ModuleList()
 
         for j in range(n_attned_gnn):
@@ -353,15 +332,9 @@ class Net(nn.Module):
                 # )
                 GNN_LinearAttn(gnn_hidden, use_degree, dropout)
             )
-            # self.gnn_drops.append(nn.Dropout(p=dropout))
-            # self.gnn_relus.append(nn.ReLU())
 
             self.FFN_layers.append(
-                FeedForwardBlock(
-                    gnn_hidden,
-                    ffn_ratio,
-                    dropout=dropout,
-                )
+                FeedForwardBlock(gnn_hidden, ffn_ratio, dropout=dropout)
             )
 
         if self.dataset == "nasbench101" or self.dataset == "nasbench201":
@@ -400,6 +373,7 @@ class Net(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.trunc_normal_(m.weight, std=0.02)
+                # nn.init.kaiming_normal_(m.weight, mode="fan_in")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -452,11 +426,6 @@ class Net(nn.Module):
                     },
                     commit=False,
                 )
-                # 要考虑一下feature_norm加在sum之前还是之后比较好
-                # 加在前面：每个位置的输入平衡，输出不平衡
-                # 加在后面：每个位置的输入不平衡，输出平衡
-                # 这里需要每个token近似相等，然后通过sum计算最后推理延时
-                # 因此加在前面更为合理
                 x = self.pre_reduction(x)
                 if self.reduce_func == "sum":
                     x = x.sum(dim=1, keepdim=False)  # x (1, D)
