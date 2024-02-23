@@ -6,6 +6,7 @@ from .onnx_flops import calculate_onnx_flops
 from .node_feature import extract_node_features
 from .other_feature import *
 
+
 def modify_onnx_batch_size(onnx_G, batch_size):
     # initializer names, in case of names of input include initializers
     init_names = set()
@@ -45,7 +46,9 @@ def parse_from_onnx(onnx_path, batch_size):
     return nx_G, output_shapes, flops, params, macs, node_flops, newG
 
 
-def extract_graph_feature_from_networkx(nx_G, batch_size, output_shapes, flops, params, macs, embed_type, undirected=True):
+def extract_graph_feature_from_networkx(
+    nx_G, batch_size, output_shapes, flops, params, macs, embed_type, undirected=True
+):
 
     # node features
     node_features = extract_node_features(nx_G, output_shapes, batch_size, embed_type)
@@ -74,6 +77,7 @@ def extract_graph_feature_from_networkx(nx_G, batch_size, output_shapes, flops, 
     topo_features = 0
 
     static_info = [batch_size, flops / 1e9, params / 1e9, macs / 1e9]
+    # static_info = [batch_size, flops / 1e8, params / 1e6, macs / 1e6]
     static_features = extract_static_feature(static_info, embed_type)
     # test connect relationship
     # xs, ys = np.where(adjacent > 0)
@@ -85,9 +89,13 @@ def extract_graph_feature_from_networkx(nx_G, batch_size, output_shapes, flops, 
 
 
 def extract_graph_feature(onnx_path, batch_size, embed_type, return_onnx=False):
-    nx_G, output_shapes, flops, params, macs, node_flops, onnx_G = parse_from_onnx(onnx_path, batch_size)
-    adjacent, features, static_features, topo_features = extract_graph_feature_from_networkx(
-        nx_G, batch_size, output_shapes, flops, params, macs, embed_type
+    nx_G, output_shapes, flops, params, macs, node_flops, onnx_G = parse_from_onnx(
+        onnx_path, batch_size
+    )
+    adjacent, features, static_features, topo_features = (
+        extract_graph_feature_from_networkx(
+            nx_G, batch_size, output_shapes, flops, params, macs, embed_type, False
+        )
     )
     # features: node encoding
 

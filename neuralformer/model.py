@@ -43,11 +43,15 @@ class GNN_LinearAttn(nn.Module):
     def __init__(self, dim: int, degree: bool, dropout: int = 0.0):
         super().__init__()
         self.degree = degree
+        self.dim = dim
+        self.n_head = 2
+        self.head_size = dim // self.n_head
 
         self.lin_qk = nn.Linear(dim, dim)
         self.lin_l = nn.Linear(dim, dim)
         self.lin_r = nn.Linear(dim, dim, bias=False)
         self.relu = nn.ReLU()
+        self.proj = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(dropout)
 
         if degree:
@@ -59,19 +63,26 @@ class GNN_LinearAttn(nn.Module):
             degree = torch.sigmoid(self.lin_d(degree))
             x = x * degree
 
+        B, L, C = x.shape
         QK = torch.sigmoid(self.lin_qk(x))
-        scores = torch.matmul(QK, QK.transpose(-2, -1)) / math.sqrt(x.size(-1))
-        scores = scores * adj
+        QK = QK.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        scores = torch.matmul(QK, QK.transpose(-2, -1)) / math.sqrt(self.head_size)
+        adj = adj.reshape(B, 1, L, L)
+        scores = scores * torch.cat([adj, adj.mT], dim=1)
 
-        attn = scores / (scores.sum(dim=-1, keepdim=True) + 1e-6)
+        # As the adj matrix are very sparse (usually 1 connection),
+        # normalize the scores will get identity attention.
+        # attn = scores / (scores.sum(dim=-1, keepdim=True) + 1e-6)
+        attn = scores
 
-        out = torch.matmul(attn, x)
-        out = self.lin_l(out)
+        out = self.lin_l(x).view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        out = torch.matmul(attn, out)
+        out = out.transpose(1, 2).contiguous().view(B, L, self.dim)
 
         # Adj Feat + Root Feat
         out = out + self.lin_r(x)
 
-        return self.dropout(self.relu(out))
+        return self.dropout(self.proj(self.relu(out))) + x
 
 
 def drop_path(
@@ -145,32 +156,22 @@ class MultiHeadAttention(nn.Module):
 
         B, L, C = x.shape
 
-        query, key, value = self.qkv(x).chunk(3, -1)
-        query = query.view(B, L, self.n_head, self.head_size).transpose(1, 2)
-        key = key.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        qk, value, res = self.qkv(x).chunk(3, -1)
+        qk = qk.view(B, L, self.n_head, self.head_size).transpose(1, 2)
         value = value.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        qk = torch.sigmoid(qk)
         # (b, n_head, l_q, d_per_head) * (b, n_head, d_per_head, l_k)
-        attn = torch.matmul(query, key.mT) / math.sqrt(self.head_size)
+        attn = torch.matmul(qk, qk.mT) / math.sqrt(self.head_size)
 
-        if self.rel_pos_bias:
-            attn_mask = adj + torch.eye(
-                adj.shape[-1], dtype=adj.dtype, device=adj.device
-            )
-            attn = attn.masked_fill(attn_mask == 0, -torch.inf)
-            attn = F.softmax(attn, dim=-1)
-        else:
-            attn_mask = adj
-            attn = attn.masked_fill(attn_mask == 0, -torch.inf)
-            attn = F.softmax(attn, dim=-1) + torch.eye(
-                attn.shape[-1], dtype=attn.dtype, device=attn.device
-            )
+        adj = adj.reshape(B, 1, L, L)
+        attn = attn * torch.cat([adj, adj.mT], dim=1)
 
         # attn = F.relu(attn)
         # attn = attn / (attn.sum(-1, True) + 1e-6)
         attn = self.attn_dropout(attn)  # (b, n_head, l_q, l_k)
         x = torch.matmul(attn, value)
 
-        x = x.transpose(1, 2).contiguous().view(B, L, self.dim)
+        x = x.transpose(1, 2).contiguous().view(B, L, self.dim) + res
         return self.resid_dropout(self.proj(x))
 
     def extra_repr(self) -> str:
@@ -182,9 +183,10 @@ class SelfAttentionBlock(nn.Module):
         self,
         dim: int,
         degree: bool = False,
-        n_head: int = 8,
+        n_head: int = 2,
         dropout: float = 0.0,
         droppath: float = 0.0,
+        layer_scale_init_value: float = 1e-4,
         rel_pos_bias: bool = False,
     ):
         super().__init__()
@@ -199,7 +201,7 @@ class SelfAttentionBlock(nn.Module):
             rel_pos_bias=rel_pos_bias,
         )
         self.drop_path = DropPath(droppath) if droppath > 0.0 else nn.Identity()
-        self.layer_scale = Scale(dim)
+        self.layer_scale = Scale(dim, layer_scale_init_value)
         self.res_scale = nn.Identity()  # Scale(dim, 1.0)
 
     def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
@@ -256,13 +258,14 @@ class FeedForwardBlock(nn.Module):
         act_layer: str = "relu",
         dropout: float = 0.0,
         droppath: float = 0.0,
+        layer_scale_init_value: float = 1e-4,
     ):
         super().__init__()
 
         self.norm = nn.LayerNorm(dim)
         self.mlp = GCNMlp(dim, mlp_ratio, act_layer=act_layer, drop=dropout)
         self.drop_path = DropPath(droppath) if droppath > 0.0 else nn.Identity()
-        self.layer_scale = Scale(dim)
+        self.layer_scale = Scale(dim, layer_scale_init_value)
         self.res_scale = nn.Identity()  # Scale(dim, 1.0)
 
     def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
@@ -285,7 +288,6 @@ class PreReduction(nn.Module):
             nn.Dropout(p=dropout),
         )
         self.scale = 1e-2
-        # self.layer_scale = Scale(out_dim, 1e-2)
 
     def forward(self, x):
         x = self.norm(x)  # normalize each position
@@ -308,7 +310,7 @@ class Net(nn.Module):
         reduce_func="sum",
         norm_sf=False,
         ffn_ratio=4,
-        init_value=1e-4,
+        layer_scale_init_value=1e-4,
         real_test=False,
         dropout=0.05,
         rel_pos_bias=True,
@@ -327,14 +329,23 @@ class Net(nn.Module):
 
         for j in range(n_attned_gnn):
             self.gnn_layers.append(
-                # SelfAttentionBlock(
-                #     gnn_hidden, use_degree, dropout=dropout, rel_pos_bias=True
-                # )
-                GNN_LinearAttn(gnn_hidden, use_degree, dropout)
+                SelfAttentionBlock(
+                    gnn_hidden,
+                    use_degree,
+                    dropout=dropout,
+                    layer_scale_init_value=layer_scale_init_value,
+                    rel_pos_bias=True,
+                )
+                # GNN_LinearAttn(gnn_hidden, use_degree, dropout)
             )
 
             self.FFN_layers.append(
-                FeedForwardBlock(gnn_hidden, ffn_ratio, dropout=dropout)
+                FeedForwardBlock(
+                    gnn_hidden,
+                    ffn_ratio,
+                    dropout=dropout,
+                    layer_scale_init_value=layer_scale_init_value,
+                )
             )
 
         if self.dataset == "nasbench101" or self.dataset == "nasbench201":
@@ -372,8 +383,8 @@ class Net(nn.Module):
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                # nn.init.kaiming_normal_(m.weight, mode="fan_in")
+                # nn.init.trunc_normal_(m.weight, std=0.02)
+                nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="linear")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
@@ -419,13 +430,13 @@ class Net(nn.Module):
                     x = ffn(x, adj_i)
 
                 x_ = x.detach()
-                wandb.log(
-                    {
-                        "extractor mean": x_.mean().item(),
-                        "extractor stds": x_.std().item(),
-                    },
-                    commit=False,
-                )
+                # wandb.log(
+                #     {
+                #         "extractor mean": x_.mean().item(),
+                #         "extractor stds": x_.std().item(),
+                #     },
+                #     commit=False,
+                # )
                 x = self.pre_reduction(x)
                 if self.reduce_func == "sum":
                     x = x.sum(dim=1, keepdim=False)  # x (1, D)

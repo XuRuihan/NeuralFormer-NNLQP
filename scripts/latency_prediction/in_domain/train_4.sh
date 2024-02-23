@@ -3,7 +3,8 @@ DATASET_DIR="$BASE_DIR/dataset/unseen_structure"
 
 mkdir log
 
-exp_name="gnn_linearattn_drop0.05_layerscale_lr0.001_ff_gradmase"
+exp_name="gnn_linearattn_drop0.05_lr0.001_baseline_trunc_normal"
+echo $exp_name
 CUDA_VISIBLE_DEVICES=3 python $BASE_DIR/main.py \
     --gpu 3 \
     --lr 0.001 \

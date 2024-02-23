@@ -33,7 +33,7 @@ OPS = {
             "kernel_shape",
             "strides",
             "pads",
-            #"dilations",
+            # "dilations",
         ],
     },
     "Split": {
@@ -54,7 +54,7 @@ OPS = {
         "code": 10,
         "attrs": [
             "perm",
-        ]
+        ],
     },
     "Upsample": {
         "code": 11,
@@ -144,28 +144,30 @@ OPS = {
 
 # define the value type of attr value, and its feature length
 ATTRS = {
-    "kernel_shape"  : ("tuple", 1,  0,   1),
-    "strides"       : ("tuple", 1,  0,   1),
-    "pads"          : ("tuple", 1,  0,   1),
-    "dilations"     : ("tuple", 1,  0,   1),
-    "group"         : ("int"  ,     0,   1),
-    "bias"          : ("bool" ,     0,   1),
-    "perm"          : ("tuple", 8,  0,   1),
-    "output_padding": ("tuple", 1,  0,   1),
+    "kernel_shape": ("tuple", 1, 0, 1),
+    "strides": ("tuple", 1, 0, 1),
+    "pads": ("tuple", 1, 0, 1),
+    "dilations": ("tuple", 1, 0, 1),
+    "group": ("int", 0, 1),
+    "bias": ("bool", 0, 1),
+    "perm": ("tuple", 8, 0, 1),
+    "output_padding": ("tuple", 1, 0, 1),
 }
 
 # define the fixed length of feature op_code, attrs, output shape
-FEATURE_LENGTH = {                                                                                                                                           
-    "op_type": 32,                                                                                                                                            
-    "attrs": 8,                                                                                                                                              
-    "output_shape": 4,                                                                                                                                       
-    "topology": 2,                                                                                                                                           
-    "static": 4,                                                                                                                                             
-}        
+FEATURE_LENGTH = {
+    "op_type": 32,
+    "attrs": 8,
+    "output_shape": 4,
+    "topology": 2,
+    "static": 4,
+}
 
-# dim= 152 = 32 + 10*8 + 10*4
-FEATURE_DIM = {                                                                                                                                                                                                                                                                                    
-    "attrs": 80,                                                                                                                                            
-    "output_shape": 40,                                                                                                                                                                                                                                                                            
-    "static": 40,                                                                                                                                           
+# dim = 152 = 32 + 10*8 + 10*4
+# dim = 192 = 32 + 10*8 + 20*4
+FEATURE_DIM = {
+    "attrs": 80,
+    # "output_shape": 40,
+    "output_shape": 80,
+    "static": 40,
 }

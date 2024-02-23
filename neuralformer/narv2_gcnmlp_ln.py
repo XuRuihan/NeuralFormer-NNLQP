@@ -48,12 +48,16 @@ def init_tensor(tensor, init_type, nonlinearity):
 
 
 class Scale(nn.Module):
-    def __init__(self, dim, init_value=1.0):
+    def __init__(self, dim: int, init_value: float = 1e-4):
         super().__init__()
+        self.init_value = init_value
         self.scale = nn.Parameter(init_value * torch.ones(dim), requires_grad=True)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         return x * self.scale
+
+    def extra_repr(self) -> str:
+        return f"init_value={self.init_value}"
 
 
 class GNN_LinearAttn(nn.Module):
@@ -71,25 +75,15 @@ class GNN_LinearAttn(nn.Module):
         if degree:
             self.lin_d = nn.Linear(1, in_dim, bias=True)
 
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.lin_l.reset_parameters()
-        self.lin_r.reset_parameters()
+    def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
         if self.degree:
-            self.lin_d.reset_parameters()
-
-    def forward(self, x, A):
-        if self.degree:
-            degree = A.sum(dim=-1, keepdim=True)  # (B, N, 1)
+            degree = adj.sum(dim=-1, keepdim=True)  # (B, N, 1)
             degree = torch.sigmoid(self.lin_d(degree))
             x = x * degree
 
         QK = torch.sigmoid(self.lin_qk(x))
-        scores = torch.matmul(QK, QK.transpose(-2, -1)) / math.sqrt(
-            x.size(-1)
-        )  # (B, N, N)
-        scores = scores * A
+        scores = torch.matmul(QK, QK.transpose(-2, -1)) / math.sqrt(x.size(-1))
+        scores = scores * adj
 
         attn = scores / (scores.sum(dim=-1, keepdim=True) + 1e-6)
 
@@ -285,26 +279,29 @@ class FeedForwardBlock(nn.Module):
         act_layer: str = "relu",
         dropout: float = 0.0,
         droppath: float = 0.0,
+        layer_scale_init_value: float = 1e-4,
     ):
         super().__init__()
 
         self.norm = nn.LayerNorm(dim)
-        self.feed_forward = GCNMlp(dim, mlp_ratio, act_layer=act_layer, drop=dropout)
+        self.mlp = GCNMlp(dim, mlp_ratio, act_layer=act_layer, drop=dropout)
         self.drop_path = DropPath(droppath) if droppath > 0.0 else nn.Identity()
-        self.layer_scale = Scale(dim, 1e-4)
+        self.layer_scale = Scale(dim, layer_scale_init_value)
+        self.res_scale = nn.Identity()  # Scale(dim, 1.0)
 
     def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
         x_ = self.norm(x)
-        x_ = self.feed_forward(x_, adj)
-        return self.layer_scale(self.drop_path(x_)) + x
+        x_ = self.mlp(x_, adj)
+        return self.layer_scale(self.drop_path(x_)) + self.res_scale(x)
 
 
 class PreReduction(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.0):
         super().__init__()
+        assert in_dim == out_dim
         self.in_dim = in_dim
         self.norm = nn.LayerNorm(in_dim)
-        self.net = nn.Sequential(
+        self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(p=dropout),
@@ -313,8 +310,8 @@ class PreReduction(nn.Module):
 
     def forward(self, x):
         x = self.norm(x) * 0.01
-        x = self.net(x) + x
-        return x
+        out = self.mlp(x) + x
+        return out
 
 
 # reduce_func: "sum", "mul", "mean", "min", "max"
@@ -332,7 +329,7 @@ class Net(nn.Module):
         reduce_func="sum",
         norm_sf=False,
         ffn_ratio=4,
-        init_values=1e-4,
+        layer_scale_init_value=1e-4,
         real_test=False,
         dropout=0.05,
     ):
@@ -346,8 +343,6 @@ class Net(nn.Module):
         self.embedding = nn.Linear(num_node_features, gnn_hidden)
 
         self.gnn_layers = nn.ModuleList()
-        # self.gnn_drops = nn.ModuleList()
-        # self.gnn_relus = nn.ModuleList()
         self.FFN_layers = nn.ModuleList()
 
         for j in range(n_attned_gnn):
@@ -355,16 +350,13 @@ class Net(nn.Module):
                 # SelfAttentionBlock(gnn_hidden, use_degree, rel_pos_bias=True)
                 GNN_LinearAttn(gnn_hidden, gnn_hidden, False, use_degree)
             )
-            # self.gnn_drops.append(nn.Dropout(p=dropout))
-            # self.gnn_relus.append(nn.ReLU())
 
             self.FFN_layers.append(
                 FeedForwardBlock(
                     gnn_hidden,
                     ffn_ratio,
-                    # feat_shuffle,
-                    # glt_norm,
                     dropout=dropout,
+                    layer_scale_init_value=layer_scale_init_value,
                 )
             )
 
@@ -456,11 +448,6 @@ class Net(nn.Module):
                     },
                     commit=False,
                 )
-                # 要考虑一下feature_norm加在sum之前还是之后比较好
-                # 加在前面：每个位置的输入平衡，输出不平衡
-                # 加在后面：每个位置的输入不平衡，输出平衡
-                # 这里需要每个token近似相等，然后通过sum计算最后推理延时
-                # 因此加在前面更为合理
                 x = self.pre_reduction(x)
                 if self.reduce_func == "sum":
                     x = x.sum(dim=1, keepdim=False)  # x (1, D)

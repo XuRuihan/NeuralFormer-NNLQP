@@ -3,7 +3,7 @@ DATASET_DIR="$BASE_DIR/dataset/unseen_structure"
 
 mkdir log
 
-exp_name="selfattn_drop0.05_layerscale_lr0.001_ff"
+exp_name="gnn_linearattn_drop0.05_lr0.001_baseline"
 echo $exp_name
 CUDA_VISIBLE_DEVICES=2 python $BASE_DIR/main.py \
     --gpu 2 \

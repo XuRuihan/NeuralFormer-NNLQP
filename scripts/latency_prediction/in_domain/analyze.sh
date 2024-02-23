@@ -1,29 +1,23 @@
 BASE_DIR="."
 DATASET_DIR="$BASE_DIR/dataset/unseen_structure"
 
-mkdir log
-
-exp_name="dagattn_nonormalize"
+exp_name="gnn_linearattn_nodegree"
 echo $exp_name
-CUDA_VISIBLE_DEVICES=0 python $BASE_DIR/main.py \
+CUDA_VISIBLE_DEVICES=0 python $BASE_DIR/analyze.py \
+    --only_test \
     --gpu 0 \
-    --lr 0.001 \
-    --epochs 50 \
-    --batch_size 16 \
+    --batch_size 1024 \
     --data_root "$DATASET_DIR/data" \
     --all_latency_file "${DATASET_DIR}/gt_stage.txt" \
     --norm_sf \
     --onnx_dir "${DATASET_DIR}" \
-    --log "log/"${exp_name}".log" \
-    --model_dir "output/"${exp_name}"/" \
+    --log "log/test.log" \
+    --pretrain "output/"${exp_name}"/ckpt_best.pth" \
     --ckpt_save_freq 1000 \
     --test_freq 1 \
     --print_freq 50 \
     --embed_type trans \
-    --num_node_features 192 \
+    --num_node_features 152 \
     --glt_norm LN \
-    --warmup_rate 0.1 \
     --train_test_stage \
-    --hidden_size 512 \
-    --n_attned_gnn 2 \
-    --exp_name $exp_name \
+    # --use_degree \

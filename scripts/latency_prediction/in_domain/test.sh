@@ -1,7 +1,9 @@
 BASE_DIR="."
 DATASET_DIR="$BASE_DIR/dataset/unseen_structure"
 
-python $BASE_DIR/predictor/main.py \
+exp_name="gnn_linearattn"
+echo $exp_name
+CUDA_VISIBLE_DEVICES=0 python $BASE_DIR/analyze.py \
     --only_test \
     --gpu 0 \
     --batch_size 1024 \
@@ -10,7 +12,7 @@ python $BASE_DIR/predictor/main.py \
     --norm_sf \
     --onnx_dir "${DATASET_DIR}" \
     --log "log/test.log" \
-    --pretrain "checkpoints/ckpt_best.pth" \
+    --pretrain "output/"${exp_name}"/ckpt_best.pth" \
     --ckpt_save_freq 1000 \
     --test_freq 1 \
     --print_freq 50 \

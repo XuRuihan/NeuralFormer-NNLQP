@@ -9,15 +9,26 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader as TorchDataLoader
 from torch_geometric.loader import DataLoader
+from torch_scatter import scatter
 from transformers import get_linear_schedule_with_warmup
 
-import wandb
 from neuralformer.dataset import (
     AccuracyDataset,
     FixedLengthBatchSampler,
     GraphLatencyDataset,
 )
 from neuralformer.model import Net, SRLoss
+
+
+def gen_Khop_adj(edge_index, n_tokens, k=1):
+    value = torch.ones(edge_index.size(1)).to(
+        edge_index.device
+    )  # edge_index(2, num_edges)
+    temp = torch.sparse_coo_tensor(edge_index, value, size=(n_tokens, n_tokens))
+    matrix = temp.to_dense()
+
+    if k == 1:
+        return matrix
 
 
 class Metric(object):
@@ -480,7 +491,6 @@ class Trainer(object):
             loss.backward()
 
             grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5)
-            wandb.log({"grad_norm": grad_norm.item()}, commit=False)
             self.optimizer.step()
             self.scheduler.step()
 
@@ -521,18 +531,10 @@ class Trainer(object):
                     )
 
             acc, err, tau = metric.get()
-            wandb.log(
-                {
-                    "train MAPE": acc,
-                    "train ErrorBound (10%)": err[0].item(),
-                    "train ErrorBound (5%)": err[1].item(),
-                    "train ErrorBound (1%)": err[2].item(),
-                    "train Kendall's Tau": tau,
-                }
-            )
 
         return acc
 
+    @torch.inference_mode()
     def test(self):
         torch.manual_seed(1234)
         torch.cuda.manual_seed_all(1234)
@@ -544,33 +546,77 @@ class Trainer(object):
         metric = Metric()
 
         infer_time = 0
-        with torch.no_grad():
-            for iteration, batch in enumerate(self.test_loader):
-                torch.cuda.empty_cache()
+        for iteration, batch in enumerate(self.test_loader):
+            torch.cuda.empty_cache()
 
-                data1, data2, n_edges, y = self.unpack_batch(batch)
+            data1, data2, n_edges, y = self.unpack_batch(batch)
 
-                # NNLQP: data1=data, data2=static feature
-                # NasBench101/201: data1=netcode, data2=adjacency matrix
-                time_i_1 = time.time()
-                pred_cost = self.model(data1, data2, n_edges)
-                time_i_2 = time.time()
-                infer_time += time_i_2 - time_i_1
+            # NNLQP: data1=data, data2=static feature
+            # NasBench101/201: data1=netcode, data2=adjacency matrix
+            time_i_1 = time.time()
+            pred_cost = self.model(data1, data2, n_edges)
+            time_i_2 = time.time()
+            infer_time += time_i_2 - time_i_1
 
-                # pred_cost = torch.exp(pred_cost)
-                ps = pred_cost.data.cpu().numpy()[:, 0].tolist()
-                gs = y.data.cpu().numpy()[:, 0].tolist()
-                plts = None
-                metric.update(ps, gs, plts)
-                acc, err, tau = metric.get()
+            # pred_cost = torch.exp(pred_cost)
+            ps = pred_cost.data.cpu().numpy()[:, 0].tolist()
+            gs = y.data.cpu().numpy()[:, 0].tolist()
+            plts = None
+            metric.update(ps, gs, plts)
 
-                if iteration > 0 and iteration % 50 == 0:
-                    # self.logger.info("[{}/{}] MAPE: {:.5f} ErrBnd(0.1): {:.5f}".format(
-                    self.logger.info(
-                        "[{}/{}] MAPE: {:.5f} ErrBnd: {}, Tau: {:.5f}".format(
-                            iteration, num_iter, acc, err, tau
-                        )
+            data, static_feature = data1, data2
+
+            # feat (B*N, D); N=21, 124, ...
+            # adj (2, B*n_edges)
+            # n_edges (B): (n_edges1, n_edges2, ....)
+            feat, adj = data.x, data.edge_index
+
+            idx = torch.ones(data.batch.size(0)).to(feat.device)
+            idx = scatter(
+                idx, data.batch, dim=0, reduce="sum"
+            )  # (N1, N2, ..., Ni...) length of each sample in batch
+
+            for i in range(idx.size(0)):
+                if i == idx.size(0) - 1:
+                    n_nodes_i = int(sum(idx[:i]))
+                    n_edges_i = int(sum(n_edges[:i]))
+                    x_i = feat[n_nodes_i:].unsqueeze(0)
+                    adj_i = gen_Khop_adj(
+                        adj[:, n_edges_i:] - n_nodes_i, int(idx[i])
+                    ).unsqueeze(0)
+                else:
+                    n_nodes_i, n_nodes_ii = int(sum(idx[:i])), int(sum(idx[: i + 1]))
+                    n_edges_i, n_edges_ii = int(sum(n_edges[:i])), int(
+                        sum(n_edges[: i + 1])
                     )
+                    x_i = feat[n_nodes_i:n_nodes_ii].unsqueeze(0)  # x_i (1, Ni, D)
+                    adj_i = gen_Khop_adj(
+                        adj[:, n_edges_i:n_edges_ii] - n_nodes_i, int(idx[i])
+                    ).unsqueeze(0)
+
+                pe = (ps[i] - gs[i]) / gs[i]
+                if np.abs(pe) > 0.15:
+                    print(batch[3][i])
+                    # print("low ape: {}, num_ops: {}, {}".format(pe, adj_i.shape[-1], batch[3][i]))
+                    if "alexnet" in batch[3][i]:
+                        # print(batch[3][i])
+                        file_name = os.path.split(batch[3][i])[-1]
+                        np.savetxt(f"output/tensor/{file_name}.txt", x_i.squeeze().cpu().numpy(), fmt='%.4f')
+                elif np.abs(pe) < 0.001:
+                    # print("high ape: {}, num_ops: {}, {}".format(pe, adj_i.shape[-1], batch[3][i]))
+                    if "resnet" in batch[3][i]:
+                        print(batch[3][i])
+                        file_name = os.path.split(batch[3][i])[-1]
+                        np.savetxt(f"output/tensor/{file_name}.txt", x_i.squeeze().cpu().numpy(), fmt='%.4f')
+
+            acc, err, tau = metric.get()
+
+            if iteration > 0 and iteration % 50 == 0:
+                self.logger.info(
+                    "[{}/{}] MAPE: {:.5f} ErrBnd(0.1): {:.5f}, Tau: {:.5f}".format(
+                        iteration, num_iter, acc, err, tau
+                    )
+                )
 
             t1 = time.time()
             speed = (t1 - t0) / num_iter * 1000
@@ -585,16 +631,6 @@ class Trainer(object):
             self.logger.info(" * Kendall's Tau: {}".format(tau))
             self.logger.info(
                 " ------------------------------------------------------------------"
-            )
-            wandb.log(
-                {
-                    "val MAPE": acc,
-                    "val ErrorBound (10%)": err[0].item(),
-                    "val ErrorBound (5%)": err[1].item(),
-                    "val ErrorBound (1%)": err[2].item(),
-                    "val Kendall's Tau": tau,
-                },
-                commit=False,
             )
 
         if self.args.only_test:
@@ -644,24 +680,5 @@ class Trainer(object):
 if __name__ == "__main__":
     args = parse_args()
 
-    # start a new wandb run to track this script
-    wandb.init(
-        # set the wandb project where this run will be logged
-        project="NeuralFormer",
-        entity="ruihanxu",
-        tags=None,
-        group="Self Attn Ablation",
-        name=args.exp_name,
-        # track hyperparameters and run metadata
-        config={
-            "dataset": "NNLQP",
-            "learning_rate": args.lr,
-            # "architecture": "narv2_gcnmlp_ln_resconn",
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-        },
-    )
-
     trainer = Trainer(args)
     trainer.run()
-    wandb.finish()

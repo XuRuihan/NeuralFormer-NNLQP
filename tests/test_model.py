@@ -18,12 +18,12 @@ class TestModel(unittest.TestCase):
         self.args = self.init_args()
         self.device = "cpu"
 
-        path = "output/neuralformer_2_checkpoints/ckpt_latest.pth"
-        ckpt = torch.load(path, map_location="cpu")
         self.model = Net(
-            "nnlqp", True, "LN", num_node_features=152, use_degree=True, norm_sf=True
+            "nnlqp", True, "LN", num_node_features=192, use_degree=True, norm_sf=True
         )
-        self.model.load_state_dict(ckpt["state_dict"])
+        path = "output/neuralformer_2_checkpoints/ckpt_latest.pth"
+        # ckpt = torch.load(path, map_location="cpu")
+        # self.model.load_state_dict(ckpt["state_dict"])
         self.model.eval()
 
     def init_args(self):
@@ -169,7 +169,7 @@ class TestModel(unittest.TestCase):
             pred_cost = self.model(data1, data2, n_edges)
             print(pred_cost.mean(), pred_cost.std(), y)
             # print(data1.x.shape, data1.edge_index.shape, y)
-            if iteration > 3:
+            if iteration > 10:
                 break
         #     xs.append(torch.tensor(data1.x.shape))
         #     edge_indices.append(torch.tensor(data1.edge_index.shape))
