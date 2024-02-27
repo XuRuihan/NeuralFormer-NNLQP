@@ -8,8 +8,6 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_scatter import scatter
 
-import wandb
-
 from .utils import to_2tuple
 
 # from torch_geometric.utils import to_dense_adj
@@ -37,52 +35,6 @@ class Scale(nn.Module):
 
     def extra_repr(self) -> str:
         return f"init_value={self.init_value}"
-
-
-class GNN_LinearAttn(nn.Module):
-    def __init__(self, dim: int, degree: bool, dropout: int = 0.0):
-        super().__init__()
-        self.degree = degree
-        self.dim = dim
-        self.n_head = 2
-        self.head_size = dim // self.n_head
-
-        self.lin_qk = nn.Linear(dim, dim)
-        self.lin_l = nn.Linear(dim, dim)
-        self.lin_r = nn.Linear(dim, dim, bias=False)
-        self.relu = nn.ReLU()
-        self.proj = nn.Linear(dim, dim)
-        self.dropout = nn.Dropout(dropout)
-
-        if degree:
-            self.lin_d = nn.Linear(1, dim)
-
-    def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
-        if self.degree:
-            degree = adj.sum(dim=-1, keepdim=True)  # (B, N, 1)
-            degree = torch.sigmoid(self.lin_d(degree))
-            x = x * degree
-
-        B, L, C = x.shape
-        QK = torch.sigmoid(self.lin_qk(x))
-        QK = QK.view(B, L, self.n_head, self.head_size).transpose(1, 2)
-        scores = torch.matmul(QK, QK.transpose(-2, -1)) / math.sqrt(self.head_size)
-        adj = adj.reshape(B, 1, L, L)
-        scores = scores * torch.cat([adj, adj.mT], dim=1)
-
-        # As the adj matrix are very sparse (usually 1 connection),
-        # normalize the scores will get identity attention.
-        # attn = scores / (scores.sum(dim=-1, keepdim=True) + 1e-6)
-        attn = scores
-
-        out = self.lin_l(x).view(B, L, self.n_head, self.head_size).transpose(1, 2)
-        out = torch.matmul(attn, out)
-        out = out.transpose(1, 2).contiguous().view(B, L, self.dim)
-
-        # Adj Feat + Root Feat
-        out = out + self.lin_r(x)
-
-        return self.dropout(self.proj(self.relu(out))) + x
 
 
 def drop_path(
@@ -124,7 +76,8 @@ class DropPath(nn.Module):
         return f"drop_prob={round(self.drop_prob,3):0.3f}"
 
 
-class MultiHeadAttention(nn.Module):
+"""
+class GNN_LinearAttn(nn.Module):
     def __init__(
         self,
         dim: int,
@@ -164,7 +117,12 @@ class MultiHeadAttention(nn.Module):
         attn = torch.matmul(qk, qk.mT) / math.sqrt(self.head_size)
 
         adj = adj.reshape(B, 1, L, L)
-        attn = attn * torch.cat([adj, adj.mT], dim=1)
+        # pe = torch.cat([adj, adj @ adj, adj.mT, adj.mT @ adj.mT, adj @ adj.mT, adj.mT @ adj, adj @ adj @ adj.mT, adj.mT @ adj.mT @ adj], dim=1)
+        pe_1 = torch.cat([adj, adj.mT], 1)
+        pe_2 = torch.cat([pe_1 @ adj, pe_1 @ adj.mT], 1)
+        # pe_3 = torch.cat([pe_2 @ adj, pe_2 @ adj.mT], 1)
+        pe = torch.cat([pe_1, pe_1, pe_2], dim=1)
+        attn = attn * pe / (pe.sum(-1, True) + 1e-6)
 
         # attn = F.relu(attn)
         # attn = attn / (attn.sum(-1, True) + 1e-6)
@@ -176,6 +134,60 @@ class MultiHeadAttention(nn.Module):
 
     def extra_repr(self) -> str:
         return f"n_head={self.n_head}, degree={self.degree}"
+"""
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        degree: bool,
+        n_head: int,
+        dropout: float = 0.0,
+        rel_pos_bias: bool = False,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.degree = degree
+        self.n_head = n_head
+        self.head_size = dim // n_head  # default: 32
+
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.proj = nn.Linear(dim, dim)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+
+        self.rel_pos_bias = rel_pos_bias
+        if degree:
+            self.lin_d = nn.Linear(1, dim)
+
+    def forward(self, x: Tensor, adj: Optional[Tensor] = None) -> Tensor:
+        if self.degree:
+            degree = adj.sum(dim=-1, keepdim=True)  # (B, N, 1)
+            degree = torch.sigmoid(self.lin_d(degree))
+            x = x * degree
+
+        B, L, C = x.shape
+
+        query, key, value = self.qkv(x).chunk(3, -1)
+        query = query.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        key = key.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        value = value.view(B, L, self.n_head, self.head_size).transpose(1, 2)
+        attn = torch.matmul(query, key.mT) / math.sqrt(self.head_size)
+
+        if self.rel_pos_bias:
+            pe = torch.stack([adj, adj.mT, adj.mT @ adj, adj @ adj.mT], dim=1)
+            pe = pe + torch.eye(L, dtype=adj.dtype, device=adj.device)
+            attn = attn.masked_fill(pe == 0, -torch.inf)
+        attn = F.softmax(attn, dim=-1)
+        attn = self.attn_dropout(attn)  # (b, n_head, l_q, l_k)
+        x = torch.matmul(attn, value)
+
+        x = x.transpose(1, 2).contiguous().view(B, L, self.dim)
+        return self.resid_dropout(self.proj(x))
+
+    def extra_repr(self) -> str:
+        return f"n_head={self.n_head}, degree={self.degree}"
 
 
 class SelfAttentionBlock(nn.Module):
@@ -183,7 +195,7 @@ class SelfAttentionBlock(nn.Module):
         self,
         dim: int,
         degree: bool = False,
-        n_head: int = 2,
+        n_head: int = 4,
         dropout: float = 0.0,
         droppath: float = 0.0,
         layer_scale_init_value: float = 1e-4,
@@ -313,7 +325,6 @@ class Net(nn.Module):
         layer_scale_init_value=1e-4,
         real_test=False,
         dropout=0.05,
-        rel_pos_bias=True,
     ):
         super().__init__()
         self.dataset = dataset
@@ -430,13 +441,6 @@ class Net(nn.Module):
                     x = ffn(x, adj_i)
 
                 x_ = x.detach()
-                # wandb.log(
-                #     {
-                #         "extractor mean": x_.mean().item(),
-                #         "extractor stds": x_.std().item(),
-                #     },
-                #     commit=False,
-                # )
                 x = self.pre_reduction(x)
                 if self.reduce_func == "sum":
                     x = x.sum(dim=1, keepdim=False)  # x (1, D)

@@ -76,7 +76,7 @@ def extract_graph_feature_from_networkx(
 
     topo_features = 0
 
-    static_info = [batch_size, flops / 1e9, params / 1e9, macs / 1e9]
+    static_info = [batch_size, flops / 1e9, params / 1e7, macs / 1e7]
     # static_info = [batch_size, flops / 1e8, params / 1e6, macs / 1e6]
     static_features = extract_static_feature(static_info, embed_type)
     # test connect relationship

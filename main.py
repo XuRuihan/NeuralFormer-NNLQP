@@ -76,7 +76,6 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--warmup_rate", type=float, default=0.1)
     parser.add_argument("--layer_scale_init_value", type=float, default=1e-4)
-    parser.add_argument("--self_attn", action="store_true")
 
     parser.add_argument("--norm_sf", action="store_true")
     parser.add_argument("--use_degree", action="store_true")
@@ -176,7 +175,6 @@ class Trainer(object):
             ffn_ratio=self.args.ffn_ratio,
             layer_scale_init_value=self.args.layer_scale_init_value,
             real_test=self.args.only_test,
-            rel_pos_bias=self.args.self_attn,
         )
         self.model = self.model.to(self.device)
         self.logger.info("Init Model: {}".format(self.model))
@@ -464,9 +462,15 @@ class Trainer(object):
             # NNLQP: data1=data, data2=static feature
             # NasBench101/201: data1=netcode, data2=adjacency matrix
             pred_cost = self.model(data1, data2, n_edges)
+            pred_cost_2 = self.model(data1, data2, n_edges)
 
             # loss = F.mse_loss(pred_cost.log(), y.log())
             loss = F.mse_loss(pred_cost / y, y / y)
+            loss = (
+                loss
+                + F.mse_loss(pred_cost_2 / y, y / y)
+                + 0.01 * F.l1_loss(pred_cost, pred_cost_2)
+            )
             if self.args.lambda_sr > 0:
                 loss_sr = self.Loss_SR(pred_cost, y) * self.args.lambda_sr
                 loss += loss_sr
@@ -650,7 +654,7 @@ if __name__ == "__main__":
         project="NeuralFormer",
         entity="ruihanxu",
         tags=None,
-        group="Self Attn Ablation",
+        group="out of domain",
         name=args.exp_name,
         # track hyperparameters and run metadata
         config={

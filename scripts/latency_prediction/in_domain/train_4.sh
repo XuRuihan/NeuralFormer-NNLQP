@@ -3,7 +3,7 @@ DATASET_DIR="$BASE_DIR/dataset/unseen_structure"
 
 mkdir log
 
-exp_name="gnn_linearattn_drop0.05_lr0.001_baseline_trunc_normal"
+exp_name="selfattn_consistloss0.01_head4_hop2"
 echo $exp_name
 CUDA_VISIBLE_DEVICES=3 python $BASE_DIR/main.py \
     --gpu 3 \
@@ -20,10 +20,10 @@ CUDA_VISIBLE_DEVICES=3 python $BASE_DIR/main.py \
     --test_freq 1 \
     --print_freq 50 \
     --embed_type trans \
-    --num_node_features 152 \
+    --num_node_features 192 \
     --glt_norm LN \
     --warmup_rate 0.1 \
-    --train_test_stage \
+    --test_model_type mnasnet \
     --hidden_size 512 \
     --n_attned_gnn 2 \
     --exp_name $exp_name \

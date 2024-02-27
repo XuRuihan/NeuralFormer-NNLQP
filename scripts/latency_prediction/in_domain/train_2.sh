@@ -3,7 +3,7 @@ DATASET_DIR="$BASE_DIR/dataset/unseen_structure"
 
 mkdir log
 
-exp_name="gnn_daglinearattn_nonormalize"
+exp_name="selfattn_consistloss0.01_head4_hop2"
 echo $exp_name
 CUDA_VISIBLE_DEVICES=1 python $BASE_DIR/main.py \
     --gpu 1 \
@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=1 python $BASE_DIR/main.py \
     --num_node_features 192 \
     --glt_norm LN \
     --warmup_rate 0.1 \
-    --train_test_stage \
+    --test_model_type efficientb0 \
     --hidden_size 512 \
     --n_attned_gnn 2 \
     --exp_name $exp_name \

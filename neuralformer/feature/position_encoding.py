@@ -55,7 +55,7 @@ class Embedder():
 
         self.embed_fns = embed_fns
         self.out_dim = out_dim
-        
+
     def embed_tensor(self, inputs):
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
     
