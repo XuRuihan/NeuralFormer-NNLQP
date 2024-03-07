@@ -187,7 +187,7 @@ class MultiHeadAttention(nn.Module):
         return self.resid_dropout(self.proj(x))
 
     def extra_repr(self) -> str:
-        return f"n_head={self.n_head}, degree={self.degree}"
+        return f"n_head={self.n_head}, rel_pos_bias={self.rel_pos_bias}, degree={self.degree}"
 
 
 class SelfAttentionBlock(nn.Module):

@@ -312,6 +312,17 @@ class Trainer(object):
         return train_loader, test_loader
 
     def init_train_test_dataset(self):
+        # # Assigning test model types. For test only!
+        # model_types = set()
+        # for line in open(self.args.all_latency_file).readlines():
+        #     model_types.add(line.split()[4])
+        # if self.args.test_model_type is not None:
+        #     test_model_types = set([self.args.test_model_type])
+        # else:
+        #     test_model_types = model_types
+        # print(test_model_types)
+        # assert test_model_types.issubset(model_types)
+
         train_set = GraphLatencyDataset(
             self.args.data_root,
             self.args.onnx_dir,
@@ -330,6 +341,7 @@ class Trainer(object):
             self.args.multires_p,
             override_data=self.args.override_data,
             train_test_stage="test",
+            # model_types=test_model_types,
         )
 
         self.logger.info(
@@ -537,6 +549,7 @@ class Trainer(object):
 
         return acc
 
+    @torch.inference_mode()
     def test(self):
         torch.manual_seed(1234)
         torch.cuda.manual_seed_all(1234)
@@ -548,58 +561,56 @@ class Trainer(object):
         metric = Metric()
 
         infer_time = 0
-        with torch.no_grad():
-            for iteration, batch in enumerate(self.test_loader):
-                torch.cuda.empty_cache()
+        for iteration, batch in enumerate(self.test_loader):
+            torch.cuda.empty_cache()
 
-                data1, data2, n_edges, y = self.unpack_batch(batch)
+            data1, data2, n_edges, y = self.unpack_batch(batch)
 
-                # NNLQP: data1=data, data2=static feature
-                # NasBench101/201: data1=netcode, data2=adjacency matrix
-                time_i_1 = time.time()
-                pred_cost = self.model(data1, data2, n_edges)
-                time_i_2 = time.time()
-                infer_time += time_i_2 - time_i_1
+            # NNLQP: data1=data, data2=static feature
+            # NasBench101/201: data1=netcode, data2=adjacency matrix
+            time_i_1 = time.time()
+            pred_cost = self.model(data1, data2, n_edges)
+            time_i_2 = time.time()
+            infer_time += time_i_2 - time_i_1
 
-                # pred_cost = torch.exp(pred_cost)
-                ps = pred_cost.data.cpu().numpy()[:, 0].tolist()
-                gs = y.data.cpu().numpy()[:, 0].tolist()
-                plts = None
-                metric.update(ps, gs, plts)
-                acc, err, tau = metric.get()
+            # pred_cost = torch.exp(pred_cost)
+            ps = pred_cost.data.cpu().numpy()[:, 0].tolist()
+            gs = y.data.cpu().numpy()[:, 0].tolist()
+            plts = None
+            metric.update(ps, gs, plts)
+        acc, err, tau = metric.get()
 
-                if iteration > 0 and iteration % 50 == 0:
-                    # self.logger.info("[{}/{}] MAPE: {:.5f} ErrBnd(0.1): {:.5f}".format(
-                    self.logger.info(
-                        "[{}/{}] MAPE: {:.5f} ErrBnd: {}, Tau: {:.5f}".format(
-                            iteration, num_iter, acc, err, tau
-                        )
-                    )
-
-            t1 = time.time()
-            speed = (t1 - t0) / num_iter * 1000
-            acc, err, tau = metric.get()
-
+        if iteration > 0 and iteration % 50 == 0:
             self.logger.info(
-                " ------------------------------------------------------------------"
+                "[{}/{}] MAPE: {:.5f} ErrBnd(0.1): {:.5f}, Tau: {:.5f}".format(
+                    iteration, num_iter, acc, err, tau
+                )
             )
-            self.logger.info(" * Speed: {:.5f} ms/iter".format(speed))
-            self.logger.info(" * MAPE: {:.5f}".format(acc))
-            self.logger.info(" * ErrorBound: {}".format(err))
-            self.logger.info(" * Kendall's Tau: {}".format(tau))
-            self.logger.info(
-                " ------------------------------------------------------------------"
-            )
-            wandb.log(
-                {
-                    "val MAPE": acc,
-                    "val ErrorBound (10%)": err[0].item(),
-                    "val ErrorBound (5%)": err[1].item(),
-                    "val ErrorBound (1%)": err[2].item(),
-                    "val Kendall's Tau": tau,
-                },
-                commit=False,
-            )
+
+        t1 = time.time()
+        speed = (t1 - t0) / num_iter * 1000
+        acc, err, tau = metric.get()
+
+        self.logger.info(
+            " ------------------------------------------------------------------"
+        )
+        self.logger.info(" * Speed: {:.5f} ms/iter".format(speed))
+        self.logger.info(" * MAPE: {:.5f}".format(acc))
+        self.logger.info(" * ErrorBound: {}".format(err))
+        self.logger.info(" * Kendall's Tau: {}".format(tau))
+        self.logger.info(
+            " ------------------------------------------------------------------"
+        )
+        wandb.log(
+            {
+                "val MAPE": acc,
+                "val ErrorBound (10%)": err[0].item(),
+                "val ErrorBound (5%)": err[1].item(),
+                "val ErrorBound (1%)": err[2].item(),
+                "val Kendall's Tau": tau,
+            },
+            commit=False,
+        )
 
         if self.args.only_test:
             self.logger.info(

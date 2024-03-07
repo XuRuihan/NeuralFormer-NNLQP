@@ -87,7 +87,6 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--warmup_rate", type=float, default=0.1)
     parser.add_argument("--layer_scale_init_value", type=float, default=1e-4)
-    parser.add_argument("--self_attn", action="store_true")
 
     parser.add_argument("--norm_sf", action="store_true")
     parser.add_argument("--use_degree", action="store_true")
@@ -187,7 +186,6 @@ class Trainer(object):
             ffn_ratio=self.args.ffn_ratio,
             layer_scale_init_value=self.args.layer_scale_init_value,
             real_test=self.args.only_test,
-            rel_pos_bias=self.args.self_attn,
         )
         self.model = self.model.to(self.device)
         self.logger.info("Init Model: {}".format(self.model))
@@ -325,6 +323,17 @@ class Trainer(object):
         return train_loader, test_loader
 
     def init_train_test_dataset(self):
+        # Assigning test model types. For test only!
+        model_types = set()
+        for line in open(self.args.all_latency_file).readlines():
+            model_types.add(line.split()[4])
+        if self.args.test_model_type is not None:
+            test_model_types = set([self.args.test_model_type])
+        else:
+            test_model_types = model_types
+        print(test_model_types)
+        assert test_model_types.issubset(model_types)
+
         train_set = GraphLatencyDataset(
             self.args.data_root,
             self.args.onnx_dir,
@@ -343,6 +352,7 @@ class Trainer(object):
             self.args.multires_p,
             override_data=self.args.override_data,
             train_test_stage="test",
+            model_types=test_model_types,
         )
 
         self.logger.info(
@@ -475,9 +485,15 @@ class Trainer(object):
             # NNLQP: data1=data, data2=static feature
             # NasBench101/201: data1=netcode, data2=adjacency matrix
             pred_cost = self.model(data1, data2, n_edges)
+            pred_cost_2 = self.model(data1, data2, n_edges)
 
             # loss = F.mse_loss(pred_cost.log(), y.log())
             loss = F.mse_loss(pred_cost / y, y / y)
+            loss = (
+                loss
+                + F.mse_loss(pred_cost_2 / y, y / y)
+                + 0.01 * F.l1_loss(pred_cost, pred_cost_2)
+            )
             if self.args.lambda_sr > 0:
                 loss_sr = self.Loss_SR(pred_cost, y) * self.args.lambda_sr
                 loss += loss_sr
@@ -564,74 +580,74 @@ class Trainer(object):
             plts = None
             metric.update(ps, gs, plts)
 
-            data, static_feature = data1, data2
+            # data, static_feature = data1, data2
 
-            # feat (B*N, D); N=21, 124, ...
-            # adj (2, B*n_edges)
-            # n_edges (B): (n_edges1, n_edges2, ....)
-            feat, adj = data.x, data.edge_index
+            # # feat (B*N, D); N=21, 124, ...
+            # # adj (2, B*n_edges)
+            # # n_edges (B): (n_edges1, n_edges2, ....)
+            # feat, adj = data.x, data.edge_index
 
-            idx = torch.ones(data.batch.size(0)).to(feat.device)
-            idx = scatter(
-                idx, data.batch, dim=0, reduce="sum"
-            )  # (N1, N2, ..., Ni...) length of each sample in batch
+            # idx = torch.ones(data.batch.size(0)).to(feat.device)
+            # idx = scatter(
+            #     idx, data.batch, dim=0, reduce="sum"
+            # )  # (N1, N2, ..., Ni...) length of each sample in batch
 
-            for i in range(idx.size(0)):
-                if i == idx.size(0) - 1:
-                    n_nodes_i = int(sum(idx[:i]))
-                    n_edges_i = int(sum(n_edges[:i]))
-                    x_i = feat[n_nodes_i:].unsqueeze(0)
-                    adj_i = gen_Khop_adj(
-                        adj[:, n_edges_i:] - n_nodes_i, int(idx[i])
-                    ).unsqueeze(0)
-                else:
-                    n_nodes_i, n_nodes_ii = int(sum(idx[:i])), int(sum(idx[: i + 1]))
-                    n_edges_i, n_edges_ii = int(sum(n_edges[:i])), int(
-                        sum(n_edges[: i + 1])
-                    )
-                    x_i = feat[n_nodes_i:n_nodes_ii].unsqueeze(0)  # x_i (1, Ni, D)
-                    adj_i = gen_Khop_adj(
-                        adj[:, n_edges_i:n_edges_ii] - n_nodes_i, int(idx[i])
-                    ).unsqueeze(0)
+            # for i in range(idx.size(0)):
+            #     if i == idx.size(0) - 1:
+            #         n_nodes_i = int(sum(idx[:i]))
+            #         n_edges_i = int(sum(n_edges[:i]))
+            #         x_i = feat[n_nodes_i:].unsqueeze(0)
+            #         adj_i = gen_Khop_adj(
+            #             adj[:, n_edges_i:] - n_nodes_i, int(idx[i])
+            #         ).unsqueeze(0)
+            #     else:
+            #         n_nodes_i, n_nodes_ii = int(sum(idx[:i])), int(sum(idx[: i + 1]))
+            #         n_edges_i, n_edges_ii = int(sum(n_edges[:i])), int(
+            #             sum(n_edges[: i + 1])
+            #         )
+            #         x_i = feat[n_nodes_i:n_nodes_ii].unsqueeze(0)  # x_i (1, Ni, D)
+            #         adj_i = gen_Khop_adj(
+            #             adj[:, n_edges_i:n_edges_ii] - n_nodes_i, int(idx[i])
+            #         ).unsqueeze(0)
 
-                pe = (ps[i] - gs[i]) / gs[i]
-                if np.abs(pe) > 0.15:
-                    print(batch[3][i])
-                    # print("low ape: {}, num_ops: {}, {}".format(pe, adj_i.shape[-1], batch[3][i]))
-                    if "alexnet" in batch[3][i]:
-                        # print(batch[3][i])
-                        file_name = os.path.split(batch[3][i])[-1]
-                        np.savetxt(f"output/tensor/{file_name}.txt", x_i.squeeze().cpu().numpy(), fmt='%.4f')
-                elif np.abs(pe) < 0.001:
-                    # print("high ape: {}, num_ops: {}, {}".format(pe, adj_i.shape[-1], batch[3][i]))
-                    if "resnet" in batch[3][i]:
-                        print(batch[3][i])
-                        file_name = os.path.split(batch[3][i])[-1]
-                        np.savetxt(f"output/tensor/{file_name}.txt", x_i.squeeze().cpu().numpy(), fmt='%.4f')
+            #     pe = (ps[i] - gs[i]) / gs[i]
+            #     if np.abs(pe) > 0.15:
+            #         print(batch[3][i])
+            #         # print("low ape: {}, num_ops: {}, {}".format(pe, adj_i.shape[-1], batch[3][i]))
+            #         if "alexnet" in batch[3][i]:
+            #             # print(batch[3][i])
+            #             file_name = os.path.split(batch[3][i])[-1]
+            #             np.savetxt(f"output/tensor/{file_name}.txt", x_i.squeeze().cpu().numpy(), fmt='%.4f')
+            #     elif np.abs(pe) < 0.001:
+            #         # print("high ape: {}, num_ops: {}, {}".format(pe, adj_i.shape[-1], batch[3][i]))
+            #         if "resnet" in batch[3][i]:
+            #             print(batch[3][i])
+            #             file_name = os.path.split(batch[3][i])[-1]
+            #             np.savetxt(f"output/tensor/{file_name}.txt", x_i.squeeze().cpu().numpy(), fmt='%.4f')
 
-            acc, err, tau = metric.get()
+        acc, err, tau = metric.get()
 
-            if iteration > 0 and iteration % 50 == 0:
-                self.logger.info(
-                    "[{}/{}] MAPE: {:.5f} ErrBnd(0.1): {:.5f}, Tau: {:.5f}".format(
-                        iteration, num_iter, acc, err, tau
-                    )
+        if iteration > 0 and iteration % 50 == 0:
+            self.logger.info(
+                "[{}/{}] MAPE: {:.5f} ErrBnd(0.1): {:.5f}, Tau: {:.5f}".format(
+                    iteration, num_iter, acc, err, tau
                 )
-
-            t1 = time.time()
-            speed = (t1 - t0) / num_iter * 1000
-            acc, err, tau = metric.get()
-
-            self.logger.info(
-                " ------------------------------------------------------------------"
             )
-            self.logger.info(" * Speed: {:.5f} ms/iter".format(speed))
-            self.logger.info(" * MAPE: {:.5f}".format(acc))
-            self.logger.info(" * ErrorBound: {}".format(err))
-            self.logger.info(" * Kendall's Tau: {}".format(tau))
-            self.logger.info(
-                " ------------------------------------------------------------------"
-            )
+
+        t1 = time.time()
+        speed = (t1 - t0) / num_iter * 1000
+        acc, err, tau = metric.get()
+
+        self.logger.info(
+            " ------------------------------------------------------------------"
+        )
+        self.logger.info(" * Speed: {:.5f} ms/iter".format(speed))
+        self.logger.info(" * MAPE: {:.5f}".format(acc))
+        self.logger.info(" * ErrorBound: {}".format(err))
+        self.logger.info(" * Kendall's Tau: {}".format(tau))
+        self.logger.info(
+            " ------------------------------------------------------------------"
+        )
 
         if self.args.only_test:
             self.logger.info(

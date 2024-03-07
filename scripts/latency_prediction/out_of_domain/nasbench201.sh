@@ -3,10 +3,10 @@ DATASET_DIR="$BASE_DIR/dataset/unseen_structure"
 
 mkdir log
 
-exp_name="selfattn_consistloss0.01_head4_hop2"
+exp_name="selfattn_consistloss0.01_nomask_nasbench201"
 echo $exp_name
-CUDA_VISIBLE_DEVICES=2 python $BASE_DIR/main.py \
-    --gpu 2 \
+CUDA_VISIBLE_DEVICES=3 python $BASE_DIR/main.py \
+    --gpu 3 \
     --lr 0.001 \
     --epochs 50 \
     --batch_size 16 \
@@ -23,7 +23,7 @@ CUDA_VISIBLE_DEVICES=2 python $BASE_DIR/main.py \
     --num_node_features 192 \
     --glt_norm LN \
     --warmup_rate 0.1 \
-    --test_model_type googlenet \
+    --test_model_type nasbench201 \
     --hidden_size 512 \
     --n_attned_gnn 2 \
     --exp_name $exp_name \
